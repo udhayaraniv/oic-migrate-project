@@ -1,0 +1,108 @@
+name: Promote OIC3 project via Oracle GitHub integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: "Oracle Integration project identifier"
+        required: true
+      project_label:
+        description: "Optional deployment label/version"
+        required: false
+        default: ""
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Validate source and target configuration
+        run: |
+          test -n "${{ secrets.SRC_TOKEN_URL }}"
+          test -n "${{ secrets.SRC_CLIENT_ID }}"
+          test -n "${{ secrets.SRC_CLIENT_SECRET }}"
+          test -n "${{ secrets.SRC_SCOPE }}"
+          test -n "${{ secrets.SRC_OIC_BASE_URL }}"
+          test -n "${{ secrets.SRC_OIC_INSTANCE }}"
+
+          test -n "${{ secrets.TGT_TOKEN_URL }}"
+          test -n "${{ secrets.TGT_CLIENT_ID }}"
+          test -n "${{ secrets.TGT_CLIENT_SECRET }}"
+          test -n "${{ secrets.TGT_SCOPE }}"
+          test -n "${{ secrets.TGT_OIC_BASE_URL }}"
+          test -n "${{ secrets.TGT_OIC_INSTANCE }}"
+
+          test -n "${{ github.event.inputs.project_id }}"
+
+      - name: Get source access token
+        id: src_token
+        run: |
+          TOKEN=$(bash scripts/get_token.sh \
+            "${{ secrets.SRC_TOKEN_URL }}" \
+            "${{ secrets.SRC_CLIENT_ID }}" \
+            "${{ secrets.SRC_CLIENT_SECRET }}" \
+            "${{ secrets.SRC_SCOPE }}")
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Export project from source to Oracle-configured GitHub repository
+        run: |
+          bash scripts/export_project_to_github.sh \
+            "${{ secrets.SRC_OIC_BASE_URL }}" \
+            "${{ secrets.SRC_OIC_INSTANCE }}" \
+            "${{ steps.src_token.outputs.token }}" \
+            "${{ github.event.inputs.project_id }}" \
+            "${{ github.event.inputs.project_label }}"
+
+      - name: Get target access token
+        id: tgt_token
+        run: |
+          TOKEN=$(bash scripts/get_token.sh \
+            "${{ secrets.TGT_TOKEN_URL }}" \
+            "${{ secrets.TGT_CLIENT_ID }}" \
+            "${{ secrets.TGT_CLIENT_SECRET }}" \
+            "${{ secrets.TGT_SCOPE }}")
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Lookup repository project metadata from target
+        id: repo_meta
+        run: |
+          RESPONSE=$(bash scripts/list_git_projects.sh \
+            "${{ secrets.TGT_OIC_BASE_URL }}" \
+            "${{ secrets.TGT_OIC_INSTANCE }}" \
+            "${{ steps.tgt_token.outputs.token }}")
+
+          echo "$RESPONSE" > gitprojects.json
+
+          DOWNLOAD_URL=$(jq -r --arg pid "${{ github.event.inputs.project_id }}" '
+            .. | objects | select(
+              .code? == $pid or
+              .id? == $pid or
+              .name? == $pid
+            ) | .["download-url"] // .downloadUrl // .download_url // empty
+          ' gitprojects.json | head -n 1)
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "Could not find download URL for project in repository listing"
+            cat gitprojects.json
+            exit 1
+          fi
+
+          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Import project into target from GitHub repository
+        run: |
+          bash scripts/import_project_from_github.sh \
+            "${{ secrets.TGT_OIC_BASE_URL }}" \
+            "${{ secrets.TGT_OIC_INSTANCE }}" \
+            "${{ steps.tgt_token.outputs.token }}" \
+            "${{ github.event.inputs.project_id }}" \
+            "${{ steps.repo_meta.outputs.download_url }}" \
+            "${{ github.event.inputs.project_label }}"
