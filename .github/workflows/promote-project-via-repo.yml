@@ -80,21 +80,30 @@ jobs:
             "${{ steps.tgt_token.outputs.token }}")
 
           echo "$RESPONSE" > gitprojects.json
+          echo "Repository listing:"
+          cat gitprojects.json
 
-          DOWNLOAD_URL=$(jq -r --arg pid "${{ github.event.inputs.project_id }}" '
-            .. | objects | select(
-              .code? == $pid or
-              .id? == $pid or
-              .name? == $pid
-            ) | .["download-url"] // .downloadUrl // .download_url // empty
+          PROJECT_ID="${{ github.event.inputs.project_id }}"
+
+          DOWNLOAD_URL=$(jq -r --arg pid "$PROJECT_ID" '
+            .items[]
+            | select(
+                .id == ($pid + ".car")
+                or .path == ("projects/" + $pid + ".car")
+                or .path == ("deployments/" + $pid + ".car")
+                or (.id | startswith($pid))
+                or (.path | contains($pid))
+              )
+            | .download_url
           ' gitprojects.json | head -n 1)
 
-          if [ -z "$DOWNLOAD_URL" ]; then
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
             echo "Could not find download URL for project in repository listing"
             cat gitprojects.json
             exit 1
           fi
 
+          echo "Found download URL: $DOWNLOAD_URL"
           echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
 
       - name: Import project into target from GitHub repository
