@@ -1,10 +1,10 @@
-name: Promote OIC3 project via Oracle GitHub integration
+name: Promote OIC3 projects via Oracle GitHub integration
 
 on:
   workflow_dispatch:
     inputs:
-      project_id:
-        description: "Oracle Integration project identifier"
+      project_ids:
+        description: "Comma-separated Oracle Integration project identifiers"
         required: true
       project_label:
         description: "Optional deployment label/version"
@@ -40,7 +40,7 @@ jobs:
           test -n "${{ secrets.TGT_OIC_BASE_URL }}"
           test -n "${{ secrets.TGT_OIC_INSTANCE }}"
 
-          test -n "${{ github.event.inputs.project_id }}"
+          test -n "${{ github.event.inputs.project_ids }}"
 
       - name: Get source access token
         id: src_token
@@ -52,15 +52,6 @@ jobs:
             "${{ secrets.SRC_SCOPE }}")
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      - name: Export project from source to Oracle-configured GitHub repository
-        run: |
-          bash scripts/export_project_to_github.sh \
-            "${{ secrets.SRC_OIC_BASE_URL }}" \
-            "${{ secrets.SRC_OIC_INSTANCE }}" \
-            "${{ steps.src_token.outputs.token }}" \
-            "${{ github.event.inputs.project_id }}" \
-            "${{ github.event.inputs.project_label }}"
-
       - name: Get target access token
         id: tgt_token
         run: |
@@ -71,47 +62,68 @@ jobs:
             "${{ secrets.TGT_SCOPE }}")
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      - name: Lookup repository project metadata from target
-        id: repo_meta
+      - name: Promote all projects
         run: |
-          RESPONSE=$(bash scripts/list_git_projects.sh \
-            "${{ secrets.TGT_OIC_BASE_URL }}" \
-            "${{ secrets.TGT_OIC_INSTANCE }}" \
-            "${{ steps.tgt_token.outputs.token }}")
+          PROJECT_IDS="${{ github.event.inputs.project_ids }}"
+          PROJECT_LABEL="${{ github.event.inputs.project_label }}"
 
-          echo "$RESPONSE" > gitprojects.json
-          echo "Repository listing:"
-          cat gitprojects.json
+          IFS=',' read -ra PROJECT_ARRAY <<< "$PROJECT_IDS"
 
-          PROJECT_ID="${{ github.event.inputs.project_id }}"
+          for RAW_PROJECT_ID in "${PROJECT_ARRAY[@]}"; do
+            PROJECT_ID="$(echo "$RAW_PROJECT_ID" | xargs)"
 
-          DOWNLOAD_URL=$(jq -r --arg pid "$PROJECT_ID" '
-            .items[]
-            | select(
-                .id == ($pid + ".car")
-                or .path == ("projects/" + $pid + ".car")
-                or .path == ("deployments/" + $pid + ".car")
-                or (.id | startswith($pid))
-                or (.path | contains($pid))
-              )
-            | .download_url
-          ' gitprojects.json | head -n 1)
+            if [ -z "$PROJECT_ID" ]; then
+              continue
+            fi
 
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "Could not find download URL for project in repository listing"
-            cat gitprojects.json
-            exit 1
-          fi
+            echo "========================================"
+            echo "Processing project: $PROJECT_ID"
+            echo "========================================"
 
-          echo "Found download URL: $DOWNLOAD_URL"
-          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+            echo "Exporting project from source to GitHub repository..."
+            bash scripts/export_project_to_github.sh \
+              "${{ secrets.SRC_OIC_BASE_URL }}" \
+              "${{ secrets.SRC_OIC_INSTANCE }}" \
+              "${{ steps.src_token.outputs.token }}" \
+              "$PROJECT_ID" \
+              "$PROJECT_LABEL"
 
-      - name: Import project into target from GitHub repository
-        run: |
-          bash scripts/import_project_from_github.sh \
-            "${{ secrets.TGT_OIC_BASE_URL }}" \
-            "${{ secrets.TGT_OIC_INSTANCE }}" \
-            "${{ steps.tgt_token.outputs.token }}" \
-            "${{ github.event.inputs.project_id }}" \
-            "${{ steps.repo_meta.outputs.download_url }}" \
-            "${{ github.event.inputs.project_label }}"
+            echo "Fetching repository project metadata from target..."
+            RESPONSE=$(bash scripts/list_git_projects.sh \
+              "${{ secrets.TGT_OIC_BASE_URL }}" \
+              "${{ secrets.TGT_OIC_INSTANCE }}" \
+              "${{ steps.tgt_token.outputs.token }}")
+
+            echo "$RESPONSE" > gitprojects.json
+
+            DOWNLOAD_URL=$(jq -r --arg pid "$PROJECT_ID" '
+              .items[]
+              | select(
+                  .id == ($pid + ".car")
+                  or .path == ("projects/" + $pid + ".car")
+                  or .path == ("deployments/" + $pid + ".car")
+                  or (.id | startswith($pid))
+                  or (.path | contains($pid))
+                )
+              | .download_url
+            ' gitprojects.json | head -n 1)
+
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              echo "Could not find download URL for project: $PROJECT_ID"
+              cat gitprojects.json
+              exit 1
+            fi
+
+            echo "Found download URL for $PROJECT_ID: $DOWNLOAD_URL"
+
+            echo "Importing project into target..."
+            bash scripts/import_project_from_github.sh \
+              "${{ secrets.TGT_OIC_BASE_URL }}" \
+              "${{ secrets.TGT_OIC_INSTANCE }}" \
+              "${{ steps.tgt_token.outputs.token }}" \
+              "$PROJECT_ID" \
+              "$DOWNLOAD_URL" \
+              "$PROJECT_LABEL"
+
+            echo "Completed project: $PROJECT_ID"
+          done
